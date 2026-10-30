@@ -264,15 +264,15 @@ def main():
     # Define experiments 5, 6, and 9 configuration
     experiments_config = {
         'experiment_5': {
-            'model_path': 'mlruns/mlruns_5/239927948431294758/ec5ae7551fff4204a529b7c7259fab65/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_5/239927948431294758/ec5ae7551fff4204a529b7c7259fab65/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + Perceptual (Caso 5)'
         },
         'experiment_6': {
-            'model_path': 'mlruns/mlruns_6/385784109692985319/f8de3076331c4e9fb5e3187ae54a7b2b/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_6/385784109692985319/f8de3076331c4e9fb5e3187ae54a7b2b/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + SSIM (Caso 6)'
         },
         'experiment_9': {
-            'model_path': 'mlruns/mlruns_9/346230370302623680/fda24d074c4c4d909160dc5e0c37c399/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_9/346230370302623680/fda24d074c4c4d909160dc5e0c37c399/artifacts/models/best_autoencoder_model.pth',
             'name': 'Perceptual + SSIM + FFL (Caso 9)'
         }
     }

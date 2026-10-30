@@ -1,47 +1,46 @@
 # Global settings
-# debug: False
-debug: True
+debug: False
 
 # Training settings
 training:
-  epochs: 1
-  batch_size: 4
+  epochs: 500
+  batch_size: 8
   learning_rate: 1e-3
   pixel_wise_weight: 1
-  perceptual_weight: 1
+  perceptual_weight: 0
   ssim_weight: 0
-  focal_frequency_weight: 1e-4
+  focal_frequency_weight: 0
   adv_weight: 1e-2
-  max_kl_weight: 1e-2
-  kl_annealing_cycles: 4
-  kl_annealing_ratio: 0.65
+  max_kl_weight: 1e-4
+  kl_annealing_cycles: 2
+  kl_annealing_ratio: 0.75
   warmup_epochs: 5
-  val_interval: 1
+  val_interval: 20
   save_interval: 20
-  resume_checkpoint_path: "checkpoints/latest_checkpoint.pth"
+  test_checkpoint: "best"        # "best" (lowest validation L1) or "final" (last epoch)
+  resume_checkpoint_path: null   # e.g. checkpoints/<run_id>/latest_checkpoint.pth
 
 # Data settings
 data:
   patch_size: [64, 64, 64]
-  train_split: 0.80
+  train_split: 0.70
   val_split: 0.10
-  test_split: 0.10
-  task1: True
+  test_split: 0.20
+  tasks: [1, 2]                  # SynthRAD2025 tasks whose CTs are used
+  num_workers: 4
 
 # Inference settings
 inference:
   sw_batch_size: 12
-  overlap: 0
+  overlap: 0.75
   mode: "gaussian"
 
 # MLFlow settings
 mlflow:
-  tracking_uri: "file:./mlruns"  # Local storage, change to remote server if needed
+  tracking_uri: "sqlite:///mlflow.db"  # Local SQLite store, artifacts go to ./mlruns
   experiment_name: "SSL_Training"
-  register_model: true
   log_original_volume: True
   log_images: true
   tags:
-    project: "medical_translation"
+    project: "hounsfield-vae"
     data_version: "v1"
-

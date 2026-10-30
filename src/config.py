@@ -5,6 +5,15 @@ from typing import Any, Dict, Optional
 import yaml
 
 
+def str2bool(value: str) -> bool:
+    """argparse type for booleans: ``bool("False")`` would be True."""
+    if value.lower() in ("true", "1", "yes", "y"):
+        return True
+    if value.lower() in ("false", "0", "no", "n"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean, got '{value}'")
+
+
 class ConfigParser:
     """
     Parser for YAML configuration files with command-line overrides.
@@ -71,7 +80,9 @@ class ConfigParser:
 
         # Add arguments for each top-level config key to allow overrides
         for key, value in self.config.items():
-            if isinstance(value, (int, float, str, bool)):
+            if isinstance(value, bool):
+                parser.add_argument(f'--{key}', type=str2bool, help=f'Override {key}')
+            elif isinstance(value, (int, float, str)):
                 parser.add_argument(f'--{key}', type=type(value), help=f'Override {key}')
 
         args = parser.parse_args()

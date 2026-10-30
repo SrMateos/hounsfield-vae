@@ -1,53 +1,46 @@
-import unittest
-import torch
-from metrics.image_metrics import calculate_metrics
+import numpy as np
+import pytest
 
-class TestImageMetrics(unittest.TestCase):
-    def setUp(self):
-        # Create test tensors for predictions and targets
-        self.pred_identical = torch.ones((1, 3, 256, 256, 256))
-        self.target_identical = torch.ones((1, 3, 256, 256, 256))
+from src.metrics.image_metrics import ImageMetrics
 
-        # Create tensors with known differences
-        self.pred_different = torch.ones((1, 3, 256, 256, 256))
-        self.target_different = torch.zeros((1, 3, 256, 256, 256))
 
-        # Create random tensors
-        torch.manual_seed(42)  # For reproducibility
-        self.pred_random = torch.rand((1, 3, 256, 256, 256))
-        self.target_random = torch.rand((1, 3, 256, 256, 256))
+@pytest.fixture
+def volumes():
+    rng = np.random.default_rng(0)
+    gt = rng.uniform(-1000, 2000, size=(32, 32, 32))
+    mask = np.zeros_like(gt)
+    mask[4:28, 4:28, 4:28] = 1
+    return gt, mask
 
-    def test_identical_images(self):
-        # If pred and target are identical, MAE should be 0, PSNR should be high, SSIM should be 1
-        metrics = calculate_metrics(self.pred_identical, self.target_identical)
 
-        self.assertEqual(metrics["mae"], 0.0)
-        self.assertGreaterEqual(metrics["psnr"], 100.0)  # PSNR should be very high for identical images
-        self.assertAlmostEqual(metrics["ssim"], 1.0, places=5)  # SSIM should be close to 1
+def test_identical_volumes(volumes):
+    gt, mask = volumes
+    scores = ImageMetrics().score_patient(gt, gt.copy(), mask)
 
-    def test_completely_different_images(self):
-        # For completely different images, MAE should be 1, PSNR should be low, SSIM should be low
-        metrics = calculate_metrics(self.pred_different, self.target_different)
+    assert scores["mae"] == 0.0
+    assert scores["psnr"] == np.inf
+    assert scores["ms_ssim"] == pytest.approx(1.0)
 
-        self.assertEqual(metrics["mae"], 1.0)
 
-        # PSNR and SSIM are not well-defined for completely different images and should be less than inf and 1, respectively
-        self.assertLess(metrics["psnr"], float("inf"))
-        self.assertLess(metrics["ssim"], 1.0)
+def test_mae_is_in_hu_and_only_inside_mask(volumes):
+    gt, mask = volumes
+    pred = gt + 100.0
+    # Errors outside the mask must be ignored
+    pred[mask == 0] += 5000.0
 
-    def test_metrics_dict_structure(self):
-        # Test that the returned metrics dictionary has the expected structure
-        metrics = calculate_metrics(self.pred_random, self.target_random)
+    scores = ImageMetrics().score_patient(gt, pred, mask)
 
-        self.assertIsInstance(metrics, dict)
-        self.assertIn("mae", metrics)
-        self.assertIn("psnr", metrics)
-        self.assertIn("ssim", metrics)
+    assert scores["mae"] == pytest.approx(100.0)
+    assert scores["ms_ssim"] < 1.0
 
-        self.assertIsInstance(metrics["mae"], float)
-        self.assertIsInstance(metrics["psnr"], float)
-        self.assertIsInstance(metrics["ssim"], float)
 
-if __name__ == '__main__':
-    unittest.main()
+def test_worse_prediction_scores_worse(volumes):
+    gt, mask = volumes
+    rng = np.random.default_rng(1)
+    metrics = ImageMetrics()
+    small = metrics.score_patient(gt, gt + rng.normal(0, 10, gt.shape), mask)
+    large = metrics.score_patient(gt, gt + rng.normal(0, 200, gt.shape), mask)
 
+    assert small["mae"] < large["mae"]
+    assert small["psnr"] > large["psnr"]
+    assert small["ms_ssim"] > large["ms_ssim"]

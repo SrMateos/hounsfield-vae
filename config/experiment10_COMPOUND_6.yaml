@@ -25,7 +25,6 @@ data:
   train_split: 0.70
   val_split: 0.10
   test_split: 0.20
-  task1: True
 
 # Inference settings
 inference:
@@ -35,13 +34,12 @@ inference:
 
 # MLFlow settings
 mlflow:
-  tracking_uri: "file:./mlruns"  # Local storage, change to remote server if needed
+  tracking_uri: "sqlite:///mlflow.db"  # Local SQLite store, artifacts go to ./mlruns
   experiment_name: "COMPOUND_6"
-  register_model: true
   log_original_volume: True
   log_images: true
   tags:
-    project: "medical_translation"
+    project: "hounsfield-vae"
     data_version: "v1"
 
 

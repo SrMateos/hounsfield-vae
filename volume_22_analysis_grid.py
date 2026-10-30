@@ -314,31 +314,31 @@ def main():
     # Define all your experiments configuration in the order you want them displayed
     experiments_config = {
         'experiment_1': {
-            'model_path': 'mlruns/mlruns_1/313770645939694569/7a56cdd2aecc410eac749071cdd68308/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_1/313770645939694569/7a56cdd2aecc410eac749071cdd68308/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 (Línea Base)'
         },
         'experiment_2': {
-            'model_path': 'mlruns/mlruns_2/675918440420340658/48d40c1d5de64fd59dddb31484454246/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_2/675918440420340658/48d40c1d5de64fd59dddb31484454246/artifacts/models/best_autoencoder_model.pth',
             'name': 'Perceptual'
         },
         'experiment_3': {
-            'model_path': 'mlruns/mlruns_3/360562246159054027/725589bfcea14434a5ea4cb2a0c27dc3/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_3/360562246159054027/725589bfcea14434a5ea4cb2a0c27dc3/artifacts/models/best_autoencoder_model.pth',
             'name': 'SSIM'
         },
         'experiment_4': {
-            'model_path': 'mlruns/mlruns_4/702153582262418679/313e751960b44e48a74ca829ea6e66a1/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_4/702153582262418679/313e751960b44e48a74ca829ea6e66a1/artifacts/models/best_autoencoder_model.pth',
             'name': 'FFL'
         },
         'experiment_7': {
-            'model_path': 'mlruns/mlruns_7/744827778112609234/7c8722fe646e465593e5028ff63ed29a/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_7/744827778112609234/7c8722fe646e465593e5028ff63ed29a/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + FFL'
         },
         'experiment_8': {
-            'model_path': 'mlruns/mlruns_8/148501807127053673/c3d6cbcff4ed4cb39e5bf691407d12df/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_8/148501807127053673/c3d6cbcff4ed4cb39e5bf691407d12df/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + SSIM + FFL'
         },
         'experiment_10': {
-            'model_path': 'mlruns/mlruns_10/819515919217557588/24198dcbfdbe49ccb4d554dd3751286f/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_10/819515919217557588/24198dcbfdbe49ccb4d554dd3751286f/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + Perceptual + SSIM + FFL'
         }
     }

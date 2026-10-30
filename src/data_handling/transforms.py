@@ -5,11 +5,14 @@ This module contains all the data augmentation and preprocessing transformations
 used for training and validation of the variational autoencoder.
 """
 
-from matplotlib import transforms
+import hashlib
+import json
+from pathlib import Path
+
 import numpy as np
 from monai.transforms import (Compose, LoadImaged,
                               RandAdjustContrastd, RandAffined,
-                              RandFlipd, RandGaussianNoised,
+                              RandGaussianNoised,
                               RandSpatialCropd, ScaleIntensityRanged,
                               SpatialPadd, EnsureTyped,
                               Invertd, Lambdad)
@@ -18,6 +21,26 @@ from src.constants import A_MAX_HU, A_MIN_HU
 
 def unnormalize(x):
     return x * (A_MAX_HU - A_MIN_HU) + A_MIN_HU
+
+
+def make_transform_hash(patch_size):
+    """
+    Build a ``hash_transform`` function for ``PersistentDataset``.
+
+    MONAI's ``json_hashing`` cannot serialize transform objects and falls back to
+    hashing their class names, so changing the HU window or the patch size would
+    silently reuse a stale cache. This hash covers the source of this module, the
+    patch size and the HU window instead.
+    """
+    def _hash(_hashable_transforms) -> bytes:
+        key = json.dumps({
+            "source": Path(__file__).read_text(),
+            "patch_size": list(patch_size),
+            "hu_window": [A_MIN_HU, A_MAX_HU],
+        })
+        return hashlib.sha256(key.encode("utf-8")).hexdigest().encode("utf-8")
+
+    return _hash
 
 def get_vae_train_transforms(patch_size=(64,)*3):
     """

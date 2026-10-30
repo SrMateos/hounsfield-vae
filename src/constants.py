@@ -1,7 +1,4 @@
-from asyncio import all_tasks
 from pathlib import Path
-
-TASK1 = True
 
 # Center D train task1
 CENTER_D_DATA_PATH_TASK1_HN = Path('data/SynthRAD2025/synthRAD2025_Task1_Train_D/synthRAD2025_Task1_Train_D/Task1/HN')
@@ -18,7 +15,7 @@ DATA_PATH_TASK1_AB = Path(TRAIN_DATA_PATH_TASK1 / 'AB')
 DATA_PATH_TASK1_HN = Path(TRAIN_DATA_PATH_TASK1 / 'HN')
 DATA_PATH_TASK1_TH = Path(TRAIN_DATA_PATH_TASK1 / 'TH')
 
-# Train task1
+# Train task2
 DATA_PATH_TASK2 = Path('data/synthRAD2025_Task2_Train/Task2')
 DATA_PATH_TASK2_AB = Path(DATA_PATH_TASK2 / 'AB')
 DATA_PATH_TASK2_HN = Path(DATA_PATH_TASK2 / 'HN')
@@ -41,6 +38,7 @@ TASK2_TH = [CENTER_D_DATA_PATH_TASK2_TH, DATA_PATH_TASK2_TH]
 ALL_TASK2 = [CENTER_D_DATA_PATH_TASK2_AB, DATA_PATH_TASK2_AB, CENTER_D_DATA_PATH_TASK2_HN, DATA_PATH_TASK2_HN, CENTER_D_DATA_PATH_TASK2_TH, DATA_PATH_TASK2_TH]
 
 ALL_TASKS = ALL_TASK1 + ALL_TASK2
+TASK_PATHS = {1: ALL_TASK1, 2: ALL_TASK2}
 
 PATCH_SIZE = (64,) * 3
 MODEL_PATH = Path("ssl_model.pth")
@@ -49,6 +47,3 @@ OUTPUT_MODEL_PATH = Path("cbct_to_ct_model.pth")
 # A broad range for different organ types https://radiopaedia.org/articles/windowing-ct
 A_MIN_HU = -1024
 A_MAX_HU = 3071
-
-
-

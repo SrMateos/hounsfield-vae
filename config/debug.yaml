@@ -1,0 +1,18 @@
+# Quick end-to-end check of the pipeline: 10 patients, 2 epochs.
+debug: True
+
+training:
+  epochs: 2
+  batch_size: 2
+  warmup_epochs: 1
+  val_interval: 1
+  save_interval: 1
+
+data:
+  num_workers: 0
+
+inference:
+  overlap: 0
+
+mlflow:
+  experiment_name: "debug"

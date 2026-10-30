@@ -20,8 +20,10 @@ from src.data_handling import (
     get_data_paths,
     get_vae_val_transforms,
     get_vae_post_transforms,
+    make_transform_hash,
 )
 from src.data_handling.datasets import split_data
+from src.utils.mlflow_utils import load_run_config
 
 
 class MultiExperimentDifferenceMapGenerator:
@@ -79,27 +81,7 @@ class MultiExperimentDifferenceMapGenerator:
 
     def _load_config_from_run(self, run_id):
         """Load configuration from MLflow run"""
-        client = mlflow.tracking.MlflowClient()
-        run = client.get_run(run_id)
-
-        # Extract configuration from parameters
-        config = {
-            "data": {
-                "patch_size": eval(run.data.params.get("patch_size", "[64, 64, 64]")),
-                "train_split": float(run.data.params.get("train_split", "0.7")),
-                "val_split": float(run.data.params.get("val_split", "0.10")),
-                "test_split": float(run.data.params.get("test_split", "0.20")),
-                "task1": run.data.params.get("task1", "True").lower() == "true"
-            },
-            "inference": {
-                "sw_batch_size": int(run.data.params.get("sw_batch_size", "20")),
-                "overlap": float(run.data.params.get("overlap", "0.75")),
-                "mode": run.data.params.get("inference_mode", "gaussian")
-            },
-            "debug": run.data.params.get("debug_mode", "False").lower() == "true"
-        }
-
-        return config
+        return load_run_config(run_id)
 
     def _load_model(self, experiment_id, run_id):
         """Load model for a specific experiment"""
@@ -162,6 +144,7 @@ class MultiExperimentDifferenceMapGenerator:
             data=test_data,
             transform=get_vae_val_transforms(patch_size=tuple(config["data"]["patch_size"])),
             cache_dir="cache/test_inference",
+            hash_transform=make_transform_hash(config["data"]["patch_size"]),
         )
 
         test_loader = DataLoader(

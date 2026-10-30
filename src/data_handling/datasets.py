@@ -5,7 +5,6 @@ This module contains functions for loading and managing datasets, including
 path resolution and data splitting utilities.
 """
 
-import logging
 from pathlib import Path
 from typing import List, Tuple, Union
 
@@ -21,7 +20,7 @@ def get_data_paths(
     Args:
         data_paths: Path or list of paths to data directories
         task1: If True, use MR images; if False, use CBCT images
-        debug: If True, limit to 5 samples per data path for debugging
+        debug: If True, keep only the first 10 samples overall
 
     Returns:
         Tuple containing:
@@ -61,7 +60,7 @@ def get_data_paths(
         image_paths = image_paths[:10]
         cts_paths = cts_paths[:10]
         masks_paths = masks_paths[:10]
-        print("Debug mode: using only 5 samples per data path.")
+        print("Debug mode: using only the first 10 samples.")
 
     return image_paths, cts_paths, masks_paths
 

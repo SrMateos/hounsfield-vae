@@ -10,3 +10,4 @@ mlruns/
 checkpoints/
 notebook_outputs/*.pth
 cache/
+mlflow.db

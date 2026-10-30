@@ -23,6 +23,7 @@ from src.constants import ALL_TASKS
 from src.data_handling import (
     get_data_paths,
     get_vae_val_transforms,
+    make_transform_hash,
 )
 from src.data_handling.datasets import split_data
 
@@ -94,7 +95,8 @@ def prepare_test_loader(config: Dict):
     )
 
     val_transforms = get_vae_val_transforms(patch_size=tuple(config["data"]["patch_size"]))
-    test_ds = PersistentDataset(data=test_data, transform=val_transforms, cache_dir="cache/test_tsne")
+    test_ds = PersistentDataset(data=test_data, transform=val_transforms, cache_dir="cache/test_tsne",
+                                hash_transform=make_transform_hash(config["data"]["patch_size"]))
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, pin_memory=True)
     return test_loader, val_transforms, test_data
 
@@ -223,7 +225,8 @@ def run_tsne_visualization(
 
     if max_volumes is not None:
         balanced_test_data = balance_volumes_by_anatomy(test_data, max_volumes, seed)
-        test_ds_balanced = PersistentDataset(data=balanced_test_data, transform=val_transforms, cache_dir=f"cache/test_tsne_{exp_key}")
+        test_ds_balanced = PersistentDataset(data=balanced_test_data, transform=val_transforms, cache_dir=f"cache/test_tsne_{exp_key}",
+                                               hash_transform=make_transform_hash(patch_size))
         test_loader = DataLoader(test_ds_balanced, batch_size=1, shuffle=False, pin_memory=True)
 
     features, labels, paths = [], [], []
@@ -302,43 +305,43 @@ def main():
     # Las rutas asumen que el script se ejecuta desde el directorio raíz del proyecto
     EXPERIMENTS_CONFIG = {
         'exp_1': {
-            'model_path': 'mlruns/mlruns_1/313770645939694569/7a56cdd2aecc410eac749071cdd68308/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_1/313770645939694569/7a56cdd2aecc410eac749071cdd68308/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 (Línea Base)'
         },
         'exp_2': {
-            'model_path': 'mlruns/mlruns_2/675918440420340658/48d40c1d5de64fd59dddb31484454246/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_2/675918440420340658/48d40c1d5de64fd59dddb31484454246/artifacts/models/best_autoencoder_model.pth',
             'name': 'Perceptual'
         },
         'exp_3': {
-            'model_path': 'mlruns/mlruns_3/360562246159054027/725589bfcea14434a5ea4cb2a0c27dc3/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_3/360562246159054027/725589bfcea14434a5ea4cb2a0c27dc3/artifacts/models/best_autoencoder_model.pth',
             'name': 'SSIM'
         },
         'exp_4': {
-            'model_path': 'mlruns/mlruns_4/702153582262418679/313e751960b44e48a74ca829ea6e66a1/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_4/702153582262418679/313e751960b44e48a74ca829ea6e66a1/artifacts/models/best_autoencoder_model.pth',
             'name': 'FFL'
         },
         'exp_5': {
-            'model_path': 'mlruns/mlruns_5/239927948431294758/ec5ae7551fff4204a529b7c7259fab65/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_5/239927948431294758/ec5ae7551fff4204a529b7c7259fab65/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + Perceptual'
         },
         'exp_6': {
-            'model_path': 'mlruns/mlruns_6/385784109692985319/f8de3076331c4e9fb5e3187ae54a7b2b/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_6/385784109692985319/f8de3076331c4e9fb5e3187ae54a7b2b/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + SSIM'
         },
         'exp_7': {
-            'model_path': 'mlruns/mlruns_7/744827778112609234/7c8722fe646e465593e5028ff63ed29a/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_7/744827778112609234/7c8722fe646e465593e5028ff63ed29a/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + FFL'
         },
         'exp_8': {
-            'model_path': 'mlruns/mlruns_8/148501807127053673/c3d6cbcff4ed4cb39e5bf691407d12df/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_8/148501807127053673/c3d6cbcff4ed4cb39e5bf691407d12df/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + SSIM + FFL'
         },
         'exp_9': {
-            'model_path': 'mlruns/mlruns_9/346230370302623680/fda24d074c4c4d909160dc5e0c37c399/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_9/346230370302623680/fda24d074c4c4d909160dc5e0c37c399/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + Perceptual + FFL'
         },
         'exp_10': {
-            'model_path': 'mlruns/mlruns_10/819515919217557588/24198dcbfdbe49ccb4d554dd3751286f/artifacts/models/final_autoencoder_model.pth',
+            'model_path': 'mlruns/mlruns_10/819515919217557588/24198dcbfdbe49ccb4d554dd3751286f/artifacts/models/best_autoencoder_model.pth',
             'name': 'L1 + Perceptual + SSIM + FFL'
         }
     }

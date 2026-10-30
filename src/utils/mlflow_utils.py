@@ -1,16 +1,21 @@
-import os
-from typing import Any, Dict
+import ast
+from typing import Any, Dict, Optional
 
 import mlflow
 
 
-def setup_mlflow(config: Dict[str, Any], experiment_name: str = "medical_image_translation"):
+def setup_mlflow(
+    config: Dict[str, Any],
+    experiment_name: str = "medical_image_translation",
+    run_id: Optional[str] = None,
+):
     """
     Sets up MLFlow tracking with the given configuration.
 
     Args:
         config: Configuration dictionary
         experiment_name: Name of the MLFlow experiment
+        run_id: Existing run to continue (used when resuming from a checkpoint)
 
     Returns:
         active_run: MLFlow active run object
@@ -24,9 +29,11 @@ def setup_mlflow(config: Dict[str, Any], experiment_name: str = "medical_image_t
     # Set the experiment
     mlflow.set_experiment(experiment_name)
 
-    # Start the run
-    run_name = config.get("run_name", None)
-    active_run = mlflow.start_run(run_name=run_name)
+    # Start (or continue) the run
+    if run_id is not None:
+        active_run = mlflow.start_run(run_id=run_id)
+    else:
+        active_run = mlflow.start_run(run_name=config.get("run_name", None))
 
 
     # Log tags if specified
@@ -48,5 +55,37 @@ def log_config(config: Dict[str, Any], prefix: str = ""):
 
         if isinstance(value, dict):
             log_config(value, f"{param_name}.")
-        elif isinstance(value, (int, float, str, bool)):
+        elif isinstance(value, (int, float, str, bool, list)):
             mlflow.log_param(param_name, value)
+
+
+def load_run_config(run_id: str) -> Dict[str, Any]:
+    """
+    Rebuild the data/inference configuration of a training run from its MLflow params,
+    so that analysis scripts reproduce the same test split.
+
+    Params are logged by `log_config` with dotted names (``data.train_split``). Older runs
+    may lack some of them (lists were not logged), in which case the defaults of
+    config/defaults.yaml are used.
+    """
+    params = mlflow.tracking.MlflowClient().get_run(run_id).data.params
+
+    def get(key, default, cast):
+        return cast(params[key]) if key in params else default
+
+    return {
+        "data": {
+            "patch_size": get("data.patch_size", [64, 64, 64], ast.literal_eval),
+            "train_split": get("data.train_split", 0.7, float),
+            "val_split": get("data.val_split", 0.1, float),
+            "test_split": get("data.test_split", 0.2, float),
+            "tasks": get("data.tasks", [1, 2], ast.literal_eval),
+            "task1": True,
+        },
+        "inference": {
+            "sw_batch_size": get("inference.sw_batch_size", 12, int),
+            "overlap": get("inference.overlap", 0.75, float),
+            "mode": get("inference.mode", "gaussian", str),
+        },
+        "debug": get("debug", "False", str).lower() == "true",
+    }

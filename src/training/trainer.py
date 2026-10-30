@@ -2,71 +2,98 @@ import logging
 import os
 import time
 
-import matplotlib.pyplot as plt
-import mlflow
-import logging
-import os
-import time
+import matplotlib
 
+matplotlib.use("Agg")  # headless: figures only go to MLflow; Tk breaks forked DataLoader workers
 import matplotlib.pyplot as plt
 import mlflow
 import mlflow.pytorch
+import numpy as np
 import torch
-from monai.data import PersistentDataset, DataLoader
+from monai.data import DataLoader, PersistentDataset, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.losses import PatchAdversarialLoss, PerceptualLoss, SSIMLoss
-from monai.visualize import matshow3d
 from monai.networks.nets import PatchDiscriminator
-from src.networks.autoencoder_kl_sigmoid import AutoencoderKLSigmoid
+from monai.transforms.utils import allow_missing_keys_mode
+from monai.utils import set_determinism
+from monai.visualize import matshow3d
 from torch.nn import L1Loss
 from tqdm import tqdm
-import numpy as np
 
-from src.constants import ALL_TASK1, ALL_TASKS
+from src.constants import TASK_PATHS
 from src.data_handling import (
     get_data_paths,
+    get_vae_post_transforms,
     get_vae_train_transforms,
     get_vae_val_transforms,
-    get_vae_post_transforms,
+    make_transform_hash,
 )
 from src.data_handling.datasets import split_data
-from src.losses import (KLLoss, FFL3D)
+from src.losses import FFL3D, KLLoss
 from src.metrics.image_metrics import ImageMetrics
-from src.utils.mlflow_utils import setup_mlflow, log_config
-from monai.transforms.utils import allow_missing_keys_mode
-from monai.data import decollate_batch
-from monai.utils import set_determinism
+from src.networks.autoencoder_kl_sigmoid import AutoencoderKLSigmoid
+from src.utils.mlflow_utils import log_config, setup_mlflow
 
-torch.manual_seed(42)
-np.random.seed(42)
-set_determinism(seed=42)
+RANDOM_SEED = 42
+
+torch.manual_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+set_determinism(seed=RANDOM_SEED)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
+    torch.cuda.manual_seed_all(RANDOM_SEED)
+
 
 class Trainer:
     def __init__(self, config):
         self.config = config
-        self.device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.image_metrics = ImageMetrics()
 
         self._setup_logging()
-        self._setup_mlflow()
         self._load_config_params()
+        self.resume_state = self._load_resume_checkpoint()
+        self._setup_mlflow()
 
         logging.info(f"Trainer initialized with config: {self.config}")
 
     def _setup_logging(self):
         logging.basicConfig(
-            level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            force=True,  # MLflow/MONAI install root handlers on import, which turns basicConfig into a no-op
         )
 
     def _setup_mlflow(self):
         experiment_name = self.config["mlflow"].get("experiment_name", "SSL_Training")
-        print(f"Setting up MLflow experiment: {experiment_name}")
+        logging.info(f"Setting up MLflow experiment: {experiment_name}")
 
-        self.run = setup_mlflow(self.config, experiment_name=experiment_name)
-        log_config(self.config)
-        mlflow.log_param("device", self.device.type)
+        if self.resume_state is not None:
+            # Continue the original run; its parameters are already logged and
+            # MLflow does not allow overwriting them.
+            self.run = setup_mlflow(
+                self.config,
+                experiment_name=experiment_name,
+                run_id=self.resume_state["mlflow_run_id"],
+            )
+            mlflow.set_tag("resumed_from_epoch", self.resume_state["epoch"] + 1)
+        else:
+            self.run = setup_mlflow(self.config, experiment_name=experiment_name)
+            log_config(self.config)
+            mlflow.log_param("device", self.device.type)
+            mlflow.log_param("random_seed", RANDOM_SEED)
+
+        self.output_dir = os.path.join("checkpoints", self.run.info.run_id)
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def _load_resume_checkpoint(self):
+        if not self.resume_checkpoint_path:
+            return None
+        if not os.path.exists(self.resume_checkpoint_path):
+            raise FileNotFoundError(
+                f"resume_checkpoint_path not found: {self.resume_checkpoint_path}"
+            )
+        logging.info(f"Resuming from checkpoint: {self.resume_checkpoint_path}")
+        return torch.load(self.resume_checkpoint_path, map_location="cpu", weights_only=True)
 
     def _load_config_params(self):
         # Data settings
@@ -74,7 +101,8 @@ class Trainer:
         self.train_split = self.config["data"].get("train_split", 0.7)
         self.val_split = self.config["data"].get("val_split", 0.15)
         self.test_split = self.config["data"].get("test_split", 0.15)
-        self.task1 = self.config["data"].get("task1", True)
+        self.tasks = self.config["data"].get("tasks", [1, 2])
+        self.num_workers = self.config["data"].get("num_workers", 4)
         self.debug_mode = bool(self.config.get("debug", False))
 
         # Training settings
@@ -98,44 +126,22 @@ class Trainer:
         self.warmup_epochs = self.config["training"].get("warmup_epochs", 5)
         self.val_interval = self.config["training"].get("val_interval", 5)
         self.save_interval = self.config["training"].get("save_interval", 20)
+        self.test_checkpoint = self.config["training"].get("test_checkpoint", "best")
+        if self.test_checkpoint not in ("best", "final"):
+            raise ValueError(
+                f"training.test_checkpoint must be 'best' or 'final', got '{self.test_checkpoint}'"
+            )
+        self.resume_checkpoint_path = self.config["training"].get("resume_checkpoint_path")
 
         # Inference settings
         self.sw_batch_size = self.config["inference"].get("sw_batch_size", 1)
         self.overlap = self.config["inference"].get("overlap", 0.5)
         self.mode = self.config["inference"].get("mode", "gaussian")
 
-    def _log_hyperparameters(self):
-        mlflow.log_params(
-            {
-                "patch_size": str(self.patch_size),
-                "train_split": self.train_split,
-                "val_split": self.val_split,
-                "test_split": self.test_split,
-                "debug_mode": self.debug_mode,
-                "batch_size": self.batch_size,
-                "num_epochs": self.num_epochs,
-                "learning_rate": self.learning_rate,
-                "pixel_wise_weight": self.pixel_wise_weight,
-                "perceptual_weight": self.perceptual_weight,
-                "ssim_weight": self.ssim_weight,
-                "focal_frequency_weight": self.focal_frequency_weight,
-                "max_kl_weight": self.max_kl_weight,
-                "adv_weight": self.adv_weight,
-                "warmup_epochs": self.warmup_epochs,
-                "val_interval": self.val_interval,
-                "save_interval": self.save_interval,
-                "sw_batch_size": self.sw_batch_size,
-                "overlap": self.overlap,
-                "inference_mode": self.mode,
-                "random_seed": 42,
-            }
-        )
-
     def _prepare_data(self):
         logging.info("Loading data...")
-        _, cts_paths, masks_paths = get_data_paths(
-            ALL_TASKS, task1=self.task1, debug=self.debug_mode
-        )
+        data_paths = [path for task in self.tasks for path in TASK_PATHS[task]]
+        _, cts_paths, masks_paths = get_data_paths(data_paths, debug=self.debug_mode)
         data = [{"image": ct, "mask": mask} for ct, mask in zip(cts_paths, masks_paths)]
         logging.info(f"First data sample: {data[0]}")
 
@@ -144,7 +150,7 @@ class Trainer:
             train_split=self.train_split,
             val_split=self.val_split,
             test_split=self.test_split,
-            random_seed=42,
+            random_seed=RANDOM_SEED,
         )
 
         logging.info(
@@ -155,18 +161,21 @@ class Trainer:
             data=train_data,
             transform=get_vae_train_transforms(patch_size=self.patch_size),
             cache_dir="cache/train",
+            hash_transform=make_transform_hash(self.patch_size),
         )
 
         val_ds = PersistentDataset(
             data=val_data,
             transform=get_vae_val_transforms(patch_size=self.patch_size),
             cache_dir="cache/val",
+            hash_transform=make_transform_hash(self.patch_size),
         )
 
         test_ds = PersistentDataset(
             data=test_data,
             transform=get_vae_val_transforms(patch_size=self.patch_size),
             cache_dir="cache/test",
+            hash_transform=make_transform_hash(self.patch_size),
         )
 
         self.val_transforms = val_ds.transform
@@ -175,29 +184,31 @@ class Trainer:
             train_ds,
             batch_size=self.batch_size,
             shuffle=True,
-            pin_memory=True
+            num_workers=self.num_workers,
+            pin_memory=True,
         )
 
         self.val_loader = DataLoader(
             val_ds,
             batch_size=1,
             shuffle=False,
-            pin_memory=True
+            num_workers=self.num_workers,
+            pin_memory=True,
         )
 
         self.test_loader = DataLoader(
             test_ds,
             batch_size=1,
             shuffle=False,
-            pin_memory=True
+            num_workers=self.num_workers,
+            pin_memory=True,
         )
 
-        mlflow.log_param("dataset_size", len(data))
-        mlflow.log_param("train_dataset_size", len(train_data))
-        mlflow.log_param("val_dataset_size", len(val_data))
-        mlflow.log_param("test_dataset_size", len(test_data))
-        print(f"Number of training samples: {len(train_data)}"
-              f", validation samples: {len(val_data)}, test samples: {len(test_data)}")
+        if self.resume_state is None:
+            mlflow.log_param("dataset_size", len(data))
+            mlflow.log_param("train_dataset_size", len(train_data))
+            mlflow.log_param("val_dataset_size", len(val_data))
+            mlflow.log_param("test_dataset_size", len(test_data))
 
     def _setup_models(self):
         self.autoencoder = AutoencoderKLSigmoid(
@@ -211,8 +222,6 @@ class Trainer:
             attention_levels=(False, False, True),
         )
         self.autoencoder.to(self.device)
-        mlflow.log_param("autoencoder_name", self.autoencoder.__class__.__name__)
-        mlflow.log_param("autoencoder_architecture_summary", str(self.autoencoder))
 
         self.discriminator = PatchDiscriminator(
             spatial_dims=3,
@@ -223,8 +232,12 @@ class Trainer:
             norm="INSTANCE"
         )
         self.discriminator.to(self.device)
-        mlflow.log_param("discriminator_name", self.discriminator.__class__.__name__)
-        mlflow.log_param("discriminator_architecture_summary", str(self.discriminator))
+
+        if self.resume_state is None:
+            mlflow.log_param("autoencoder_name", self.autoencoder.__class__.__name__)
+            mlflow.log_param("autoencoder_architecture_summary", str(self.autoencoder))
+            mlflow.log_param("discriminator_name", self.discriminator.__class__.__name__)
+            mlflow.log_param("discriminator_architecture_summary", str(self.discriminator))
 
     def _setup_losses(self):
         self.l1_loss = L1Loss().to(self.device)
@@ -259,29 +272,10 @@ class Trainer:
         self.optimizer_g.zero_grad(set_to_none=True)
         reconstruction, z_mu, z_sigma = self.autoencoder(images)
 
-        loss_ssim = 0.0
-        loss_recon = 0.0
-        loss_perc = 0.0
-        loss_focal = 0.0
-
-        if self.ssim_weight > 0:
-            # reconstruction = reconstruction.clamp(0, 1)
-            loss_ssim = self.ssim_loss(reconstruction, images)
-        if self.pixel_wise_weight > 0:
-            loss_recon = self.l1_loss(reconstruction, images)
-        if self.perceptual_weight > 0:
-            loss_perc = self.loss_perceptual(reconstruction.float(), images.float())
-        if self.focal_frequency_weight > 0:
-            loss_focal = self.focal_frequency_loss(reconstruction, images)
-
+        losses = self._reconstruction_losses(reconstruction, images)
         kl_loss = self.kl_loss(z_mu, z_sigma)
 
-        loss_g_base = (
-            (self.pixel_wise_weight * loss_recon + self.ssim_weight * loss_ssim
-                + self.focal_frequency_weight * loss_focal + self.perceptual_weight * loss_perc)
-        )
-
-        # add kl loss
+        loss_g_base = losses["total"]
         total_no_kl = loss_g_base.item()
 
         loss_g_base += self.kl_weight * kl_loss
@@ -299,7 +293,7 @@ class Trainer:
         loss_g.backward()
         self.optimizer_g.step()
 
-        ret_dictionary = {
+        return {
             "total": loss_g.item(),
             "total_base": total_no_kl,
             "kl": kl_loss.item(),
@@ -309,16 +303,68 @@ class Trainer:
                 else loss_g_adv
             ),
             "reconstruction_tensor": reconstruction,
+            "pixel-wise": losses["pixel_wise"].item(),
+            "perceptual": self._item(losses["perceptual"]),
+            "ssim": self._item(losses["ssim"]),
+            "focal_frequency": self._item(losses["focal_frequency"]),
         }
 
+    def _reconstruction_losses(self, outputs, images):
+        """
+        Weighted reconstruction loss and its terms. Terms with weight 0 are skipped
+        (returned as 0.0), except L1: it is always computed because it is the
+        model-selection metric and it keeps the total a tensor.
+        """
+        losses = {
+            "pixel_wise": self.l1_loss(outputs, images),
+            "perceptual": 0.0,
+            "ssim": 0.0,
+            "focal_frequency": 0.0,
+        }
+        if self.perceptual_weight > 0:
+            losses["perceptual"] = self.loss_perceptual(outputs.float(), images.float())
+        if self.ssim_weight > 0:
+            losses["ssim"] = self.ssim_loss(outputs, images)
+        if self.focal_frequency_weight > 0:
+            losses["focal_frequency"] = self.focal_frequency_loss(outputs, images)
 
-        ret_dictionary["pixel-wise"] = loss_recon.item() if self.pixel_wise_weight > 0 else 0.0
-        ret_dictionary["perceptual"] = loss_perc.item() if self.perceptual_weight > 0 else 0.0
-        ret_dictionary["ssim"] = loss_ssim.item() if self.ssim_weight > 0 else 0.0
-        ret_dictionary["focal_frequency"] = loss_focal.item() if self.focal_frequency_weight > 0 else 0.0
-        ret_dictionary["kl"] = kl_loss.item() if self.kl_weight > 0 else 0.0
+        losses["total"] = (
+            self.pixel_wise_weight * losses["pixel_wise"]
+            + self.perceptual_weight * losses["perceptual"]
+            + self.ssim_weight * losses["ssim"]
+            + self.focal_frequency_weight * losses["focal_frequency"]
+        )
+        return losses
 
-        return ret_dictionary
+    @staticmethod
+    def _item(value):
+        return value.item() if isinstance(value, torch.Tensor) else value
+
+    def _infer_and_restore(self, batch, post_tf):
+        """Sliding-window reconstruction of a full volume, plus the volume back in HU."""
+        images = batch["image"].to(self.device)
+        outputs = sliding_window_inference(
+            inputs=images,
+            roi_size=self.patch_size,
+            sw_batch_size=self.sw_batch_size,
+            predictor=self.autoencoder.reconstruct,
+            overlap=self.overlap,
+            mode=self.mode,
+            device=self.device,
+            sw_device=self.device,
+        )
+        losses = self._reconstruction_losses(outputs, images)
+
+        batch["pred"] = outputs
+        with allow_missing_keys_mode(self.val_transforms):
+            restored = [post_tf(sample) for sample in decollate_batch(batch)]
+
+        gt = np.squeeze(restored[0]["image"].cpu().numpy())
+        recon = np.squeeze(restored[0]["pred"].cpu().numpy())
+        mask = np.squeeze(restored[0]["mask"].cpu().numpy())
+        scores = self.image_metrics.score_patient(gt_img=gt, synthetic_ct=recon, mask=mask)
+
+        return losses, restored[0], scores
 
     def _train_discriminator_step(self, reconstruction, images, epoch):
         if epoch < self.warmup_epochs:
@@ -352,7 +398,7 @@ class Trainer:
         val_step = 0
         val_losses = {
             "total_g": 0, "pixel_wise": 0, "perceptual": 0,
-            "ssim": 0, "focal_frequency": 0, "kl": 0
+            "ssim": 0, "focal_frequency": 0,
         }
 
         val_metrics = {"mae": [], "psnr": [], "ms_ssim": []}
@@ -365,75 +411,15 @@ class Trainer:
         with torch.no_grad():
             for val_batch in self.val_loader:
                 val_step += 1
-                val_images = val_batch["image"].to(self.device)
+                losses, restored, scores = self._infer_and_restore(val_batch, post_tf)
 
-                val_outputs = sliding_window_inference(
-                    inputs=val_images,
-                    roi_size=self.patch_size,
-                    sw_batch_size=self.sw_batch_size,
-                    predictor=self.autoencoder.reconstruct,
-                    overlap=self.overlap,
-                    mode=self.mode,
-                    device=self.device,
-                    sw_device=self.device,
-                )
-
-                loss_recon = 0.0
-                loss_perc = 0.0
-                loss_ssim = 0.0
-                loss_focal = 0.0
-
-                loss_recon = self.l1_loss(val_outputs, val_images)
-                if self.perceptual_weight > 0:
-                    loss_perc = self.loss_perceptual(val_outputs.float(), val_images.float())
-                if self.ssim_weight > 0:
-                    loss_ssim = self.ssim_loss(val_outputs, val_images)
-                if self.focal_frequency_weight > 0:
-                    loss_focal = self.focal_frequency_loss(val_outputs, val_images)
-
-                val_loss_g = (
-                    (self.pixel_wise_weight * loss_recon + self.ssim_weight * loss_ssim
-                        + self.focal_frequency_weight * loss_focal + self.perceptual_weight * loss_perc
-                    )
-                )
-
-                val_losses["total_g"] += val_loss_g.item()
-                val_losses["pixel_wise"] += loss_recon.item() if self.pixel_wise_weight > 0 else 0.0
-                val_losses["perceptual"] += loss_perc.item() if self.perceptual_weight > 0 else 0.0
-                val_losses["ssim"] += loss_ssim.item() if self.ssim_weight > 0 else 0.0
-                val_losses["focal_frequency"] += loss_focal.item() if self.focal_frequency_weight > 0 else 0.0
-
-                val_batch["pred"] = val_outputs
-
-                val_samples = decollate_batch(val_batch)
-
-                with allow_missing_keys_mode(self.val_transforms):
-                    restored = [post_tf(val_sample) for val_sample in val_samples]
+                val_losses["total_g"] += losses["total"].item()
+                for key in ("pixel_wise", "perceptual", "ssim", "focal_frequency"):
+                    val_losses[key] += self._item(losses[key])
 
                 if self.config["mlflow"].get("log_images", False) and val_step == 1:
-                    # Extraemos los tensores ya de-normalizados
-                    restored_image = restored[0]["image"]
-                    restored_pred = restored[0]["pred"]
-
-                    # Pasamos los tensores de-normalizados a las funciones de logging
-                    # Asegúrate de añadir un canal y lote si es necesario para las funciones
-                    self._log_validation_images(restored_image.unsqueeze(0), restored_pred.unsqueeze(0), epoch)
-                    self._log_validation_volume(restored_pred.unsqueeze(0), epoch)
-
-                print (f"restored keys: {restored[0].keys()}")
-                print(f"type of restored: {type(restored)}")
-                print(f"length of restored: {len(restored)}")
-                print(f"Max value in restored: {restored[0]['image'].max()} - Min value: {restored[0]['image'].min()}")
-                print(f"Max value in pred: {restored[0]['pred'].max()} - Min value: {restored[0]['pred'].min()}")
-
-                gt = np.squeeze(restored[0]["image"].cpu().numpy())
-                recon = np.squeeze(restored[0]["pred"].cpu().numpy())
-                mask = np.squeeze(restored[0]["mask"].cpu().numpy())
-
-
-                scores = self.image_metrics.score_patient(
-                    gt_img=gt, synthetic_ct=recon, mask=mask
-                )
+                    self._log_validation_images(restored["image"].unsqueeze(0), restored["pred"].unsqueeze(0), epoch)
+                    self._log_validation_volume(restored["pred"].unsqueeze(0), epoch)
 
                 tqdm.write(
                     f"Validation Step {val_step} - MAE: {scores['mae']:.4f}, "
@@ -458,6 +444,7 @@ class Trainer:
             f"  Validation - Avg Losses: {losses_str}, Avg Metrics: {metrics_str}"
         )
 
+        # L1 on the normalized volume: comparable across experiments whatever their loss weights
         avg_val_loss = avg_val_losses["val_pixel_wise"]
         return avg_val_loss
 
@@ -466,7 +453,7 @@ class Trainer:
         test_step = 0
         test_losses = {
             "total_g": 0, "pixel_wise": 0, "perceptual": 0,
-            "ssim": 0, "focal_frequency": 0, "kl": 0
+            "ssim": 0, "focal_frequency": 0,
         }
         test_metrics = {"mae": [], "psnr": [], "ms_ssim": []}
         test_bar = tqdm(
@@ -478,80 +465,30 @@ class Trainer:
         with torch.no_grad():
             for test_batch in self.test_loader:
                 test_step += 1
-                test_images = test_batch["image"].to(self.device)
+                losses, restored, scores = self._infer_and_restore(test_batch, post_tf)
 
-                test_outputs = sliding_window_inference(
-                    inputs=test_images,
-                    roi_size=self.patch_size,
-                    sw_batch_size=self.sw_batch_size,
-                    predictor=self.autoencoder.reconstruct,
-                    overlap=self.overlap,
-                    mode=self.mode,
-                    device=self.device,
-                    sw_device=self.device,
-                )
+                test_losses["total_g"] += losses["total"].item()
+                for key in ("pixel_wise", "perceptual", "ssim", "focal_frequency"):
+                    test_losses[key] += self._item(losses[key])
 
-                loss_recon = 0.0
-                loss_perc = 0.0
-                loss_ssim = 0.0
-                loss_focal = 0.0
-
-                if self.pixel_wise_weight > 0:
-                    loss_recon = self.l1_loss(test_outputs, test_images)
-                if self.perceptual_weight > 0:
-                    loss_perc = self.loss_perceptual(test_outputs.float(), test_images.float())
-                if self.ssim_weight > 0:
-                    loss_ssim = self.ssim_loss(test_outputs, test_images)
-                if self.focal_frequency_weight > 0:
-                    loss_focal = self.focal_frequency_loss(test_outputs, test_images)
-                test_loss_g = (
-                    (self.pixel_wise_weight * loss_recon + self.ssim_weight * loss_ssim
-                        + self.focal_frequency_weight * loss_focal + self.perceptual_weight * loss_perc
-                    )
-                )
-                test_losses["total_g"] += test_loss_g.item()
-                test_losses["pixel_wise"] += loss_recon.item() if self.pixel_wise_weight > 0 else 0.0
-                test_losses["perceptual"] += loss_perc.item() if self.perceptual_weight > 0 else 0.0
-                test_losses["ssim"] += loss_ssim.item() if self.ssim_weight > 0 else 0.0
-                test_losses["focal_frequency"] += loss_focal.item() if self.focal_frequency_weight > 0 else 0.0
-
-                test_batch["pred"] = test_outputs
-
-                test_samples = decollate_batch(test_batch)
-
-                with allow_missing_keys_mode(self.val_transforms):
-                    restored = [post_tf(test_sample) for test_sample in test_samples]
-
-                # usamos las de-normalizadas
-                restored_image = restored[0]["image"]
-                restored_pred = restored[0]["pred"]
-                # Log the middle slice of the first batch only
-                self._log_validation_images(restored_image.unsqueeze(0), restored_pred.unsqueeze(0), epoch=test_step, test=True)
-
-                self._log_validation_volume(restored_image.unsqueeze(0), epoch=test_step, test=True, test_original=True)
-                self._log_validation_volume(restored_pred.unsqueeze(0), epoch=test_step, test=True, test_original=False)
-
-
-                gt = np.squeeze(restored[0]["image"].cpu().numpy())
-                recon = np.squeeze(restored[0]["pred"].cpu().numpy())
-                mask = np.squeeze(restored[0]["mask"].cpu().numpy())
-
-                scores = self.image_metrics.score_patient(
-                    gt_img=gt, synthetic_ct=recon, mask=mask
-                )
+                self._log_validation_images(restored["image"].unsqueeze(0), restored["pred"].unsqueeze(0), epoch=test_step, test=True)
+                self._log_validation_volume(restored["image"].unsqueeze(0), epoch=test_step, test=True, test_original=True)
+                self._log_validation_volume(restored["pred"].unsqueeze(0), epoch=test_step, test=True, test_original=False)
 
                 tqdm.write(
                     f"Test Step {test_step} - MAE: {scores['mae']:.4f}, "
                     f"PSNR: {scores['psnr']:.4f}, MS-SSIM: {scores['ms_ssim']:.4f}"
                 )
-                mlflow.log_metrics({f"test_step_{test_step}_mae": scores['mae'],
-                                     f"test_step_{test_step}_psnr": scores['psnr'],
-                                     f"test_step_{test_step}_ms_ssim": scores['ms_ssim']}, step=0)
-                mlflow.log_metric(f"test_step_{test_step}_pixel_wise_loss", loss_recon.item() if self.pixel_wise_weight > 0 else 0.0, step=0)
-                mlflow.log_metric(f"test_step_{test_step}_perceptual_loss", loss_perc.item() if self.perceptual_weight > 0 else 0.0, step=0)
-                mlflow.log_metric(f"test_step_{test_step}_ssim_loss", loss_ssim.item() if self.ssim_weight > 0 else 0.0, step=0)
-                mlflow.log_metric(f"test_step_{test_step}_focal_frequency_loss", loss_focal.item() if self.focal_frequency_weight > 0 else 0.0, step=0)
-                mlflow.log_metric(f"test_step_{test_step}_total_generator_loss", test_loss_g.item(), step=0)
+                mlflow.log_metrics({
+                    f"test_step_{test_step}_mae": scores["mae"],
+                    f"test_step_{test_step}_psnr": scores["psnr"],
+                    f"test_step_{test_step}_ms_ssim": scores["ms_ssim"],
+                    f"test_step_{test_step}_pixel_wise_loss": losses["pixel_wise"].item(),
+                    f"test_step_{test_step}_perceptual_loss": self._item(losses["perceptual"]),
+                    f"test_step_{test_step}_ssim_loss": self._item(losses["ssim"]),
+                    f"test_step_{test_step}_focal_frequency_loss": self._item(losses["focal_frequency"]),
+                    f"test_step_{test_step}_total_generator_loss": losses["total"].item(),
+                }, step=0)
 
                 for key, value in scores.items():
                     test_metrics[key].append(value)
@@ -572,7 +509,6 @@ class Trainer:
         )
 
         return avg_test_losses, avg_metrics
-
 
     def _log_validation_images(self, val_images, val_outputs, epoch, test=False):
         img_slice = val_images[0, 0, :, :, val_images.shape[-1] // 2].cpu().numpy()
@@ -634,29 +570,26 @@ class Trainer:
         mlflow.log_metric("best_val_recon_loss_epoch", epoch)
         mlflow.log_metric("best_val_recon_loss", best_val_metric)
 
-        best_autoencoder_path = "best_autoencoder_model.pth"
-        best_discriminator_path = "best_discriminator_model.pth"
+        self.best_autoencoder_path = os.path.join(self.output_dir, "best_autoencoder_model.pth")
+        best_discriminator_path = os.path.join(self.output_dir, "best_discriminator_model.pth")
 
-        torch.save(self.autoencoder.state_dict(), best_autoencoder_path)
+        torch.save(self.autoencoder.state_dict(), self.best_autoencoder_path)
         torch.save(self.discriminator.state_dict(), best_discriminator_path)
 
-        mlflow.log_artifact(best_autoencoder_path, artifact_path="models")
+        mlflow.log_artifact(self.best_autoencoder_path, artifact_path="models")
         mlflow.log_artifact(best_discriminator_path, artifact_path="models")
 
         tqdm.write(
             f"New best model saved with validation recon loss: {best_val_metric:.4f}"
         )
 
-    def _save_checkpoint(self, epoch):
-        checkpoint_dir = "checkpoints"
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
+    def _save_checkpoint(self, epoch, best_val_metric):
         autoencoder_ckpt_path = os.path.join(
-            checkpoint_dir, f"autoencoder_epoch_{epoch+1}.pth"
+            self.output_dir, f"autoencoder_epoch_{epoch+1}.pth"
         )
 
         discriminator_ckpt_path = os.path.join(
-            checkpoint_dir, f"discriminator_epoch_{epoch+1}.pth"
+            self.output_dir, f"discriminator_epoch_{epoch+1}.pth"
         )
 
         torch.save(self.autoencoder.state_dict(), autoencoder_ckpt_path)
@@ -665,7 +598,40 @@ class Trainer:
         mlflow.log_artifact(autoencoder_ckpt_path, artifact_path="checkpoints")
         mlflow.log_artifact(discriminator_ckpt_path, artifact_path="checkpoints")
 
+        # Full training state to resume from (kept locally, overwritten each time)
+        torch.save(
+            {
+                "epoch": epoch,
+                "mlflow_run_id": self.run.info.run_id,
+                "best_val_metric": best_val_metric,
+                "best_autoencoder_path": self.best_autoencoder_path,
+                "autoencoder": self.autoencoder.state_dict(),
+                "discriminator": self.discriminator.state_dict(),
+                "optimizer_g": self.optimizer_g.state_dict(),
+                "optimizer_d": self.optimizer_d.state_dict(),
+                "scheduler_g": self.scheduler_g.state_dict(),
+            },
+            os.path.join(self.output_dir, "latest_checkpoint.pth"),
+        )
+
         tqdm.write(f"Checkpoint saved at epoch {epoch+1}")
+
+    def _restore_training_state(self):
+        """Load models, optimizers and scheduler from the resume checkpoint. Returns the start epoch."""
+        if self.resume_state is None:
+            return 0
+
+        state = self.resume_state
+        self.autoencoder.load_state_dict(state["autoencoder"])
+        self.discriminator.load_state_dict(state["discriminator"])
+        self.optimizer_g.load_state_dict(state["optimizer_g"])
+        self.optimizer_d.load_state_dict(state["optimizer_d"])
+        self.scheduler_g.load_state_dict(state["scheduler_g"])
+        self.best_autoencoder_path = state["best_autoencoder_path"]
+
+        start_epoch = state["epoch"] + 1
+        logging.info(f"Resumed training state, continuing at epoch {start_epoch + 1}")
+        return start_epoch
 
     def train(self):
         self._prepare_data()
@@ -673,17 +639,22 @@ class Trainer:
         self._setup_losses()
         self._setup_optimizers()
 
+        best_val_metric = float("inf")
+        self.best_autoencoder_path = None
+        start_epoch = self._restore_training_state()
+        if self.resume_state is not None:
+            best_val_metric = self.resume_state["best_val_metric"]
+
         # Log first original volume with self._log_validation_volume to compare with validation outputs
-        if self.config["mlflow"].get("log_original_volume", False):
+        if self.config["mlflow"].get("log_original_volume", False) and start_epoch == 0:
             original_volume = self.val_loader.dataset[0]["image"]
             self._log_validation_volume(original_volume, epoch=None)
 
         logging.info("Starting training...")
 
-        best_val_metric = float("inf")
         self.kl_weight = 0.0  # Start with 0
 
-        for epoch in range(self.num_epochs):
+        for epoch in range(start_epoch, self.num_epochs):
             self.autoencoder.train()
             self.discriminator.train()
             epoch_start = time.time()
@@ -749,6 +720,7 @@ class Trainer:
                 "train_perceptual_loss": avg_losses["perceptual"],
                 "train_ssim_loss": avg_losses["ssim"],
                 "train_focal_frequency_loss": avg_losses["focal_frequency"],
+                "kl_weight": self.kl_weight,
                 "train_adv_generator_loss": avg_losses["adv_g"],
                 "train_adv_discriminator_fake_loss": avg_losses["adv_d_fake"],
                 "train_adv_discriminator_real_loss": avg_losses["adv_d_real"],
@@ -784,24 +756,37 @@ class Trainer:
 
             # Save checkpoint every save_interval epochs
             if (epoch + 1) % self.save_interval == 0:
-                self._save_checkpoint(epoch)
-
-        # Test
-        test_losses, test_metrics = self._test_epoch()
+                self._save_checkpoint(epoch, best_val_metric)
 
         # End of Training
         tqdm.write("Saving final models...")
-        mlflow.pytorch.log_model(self.autoencoder, "final_autoencoder_model")
-        mlflow.pytorch.log_model(self.discriminator, "final_discriminator_model")
+        mlflow.pytorch.log_model(self.autoencoder, name="final_autoencoder_model", serialization_format="pickle")
+        mlflow.pytorch.log_model(self.discriminator, name="final_discriminator_model", serialization_format="pickle")
 
-        final_autoencoder_path = "final_autoencoder_model.pth"
-        final_discriminator_path = "final_discriminator_model.pth"
+        final_autoencoder_path = os.path.join(self.output_dir, "final_autoencoder_model.pth")
+        final_discriminator_path = os.path.join(self.output_dir, "final_discriminator_model.pth")
 
         torch.save(self.autoencoder.state_dict(), final_autoencoder_path)
         torch.save(self.discriminator.state_dict(), final_discriminator_path)
 
         mlflow.log_artifact(final_autoencoder_path, artifact_path="models")
         mlflow.log_artifact(final_discriminator_path, artifact_path="models")
+
+        mlflow.log_metric("final_epoch", self.num_epochs)
+        mlflow.log_metric("final_val_recon_loss", best_val_metric)
+
+        # Test
+        if self.test_checkpoint == "best":
+            if self.best_autoencoder_path is not None:
+                tqdm.write(f"Testing best model: {self.best_autoencoder_path}")
+                self.autoencoder.load_state_dict(
+                    torch.load(self.best_autoencoder_path, map_location=self.device, weights_only=True)
+                )
+            else:
+                logging.warning("No validation was run, so there is no best model: testing the final model")
+        mlflow.set_tag("test_checkpoint", self.test_checkpoint if self.best_autoencoder_path else "final")
+
+        test_losses, test_metrics = self._test_epoch()
 
         str_losses = ", ".join([f"{k}: {v:.4f}" for k, v in test_losses.items()])
         str_metrics = ", ".join([f"{k}: {v:.4f}" for k, v in test_metrics.items()])
@@ -811,9 +796,5 @@ class Trainer:
         for key, value in test_metrics.items():
             tqdm.write(f"Test {key}: {value:.4f}")
 
-        # Save final models
-        mlflow.log_metric("final_epoch", self.num_epochs)
-        mlflow.log_metric("final_val_recon_loss", best_val_metric)
-
         mlflow.end_run()
-        print("Training finished.")
+        logging.info("Training finished.")

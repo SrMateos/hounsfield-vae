@@ -28,8 +28,10 @@ from src.data_handling import (
     get_data_paths,
     get_vae_val_transforms,
     get_vae_post_transforms,
+    make_transform_hash,
 )
 from src.data_handling.datasets import split_data
+from src.utils.mlflow_utils import load_run_config
 
 
 def setup_logging():
@@ -59,24 +61,7 @@ def get_experiment_name(experiment_id: str) -> str:
 
 
 def load_config_from_run(run_id: str) -> Dict:
-    client = mlflow.tracking.MlflowClient()
-    run = client.get_run(run_id)
-    cfg = {
-        "data": {
-            "patch_size": eval(run.data.params.get("patch_size", "[64, 64, 64]")),
-            "train_split": float(run.data.params.get("train_split", "0.7")),
-            "val_split": float(run.data.params.get("val_split", "0.15")),
-            "test_split": float(run.data.params.get("test_split", "0.15")),
-            "task1": run.data.params.get("task1", "True").lower() == "true"
-        },
-        "inference": {
-            "sw_batch_size": int(run.data.params.get("sw_batch_size", "1")),
-            "overlap": float(run.data.params.get("overlap", "0.5")),
-            "mode": run.data.params.get("inference_mode", "gaussian")
-        },
-        "debug": run.data.params.get("debug_mode", "False").lower() == "true"
-    }
-    return cfg
+    return load_run_config(run_id)
 
 
 def load_model(experiment_id: str, run_id: str, mlruns_path: str, device: torch.device):
@@ -122,7 +107,8 @@ def prepare_test_loader(config: Dict):
     )
 
     val_transforms = get_vae_val_transforms(patch_size=tuple(config["data"]["patch_size"]))
-    test_ds = PersistentDataset(data=test_data, transform=val_transforms, cache_dir="cache/test_umap")
+    test_ds = PersistentDataset(data=test_data, transform=val_transforms, cache_dir="cache/test_umap",
+                                hash_transform=make_transform_hash(config["data"]["patch_size"]))
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, pin_memory=True)
     return test_loader, val_transforms, test_data
 
@@ -324,7 +310,8 @@ def run_umap_visualization(
         test_ds_balanced = PersistentDataset(
             data=balanced_test_data,
             transform=val_transforms,
-            cache_dir="cache/test_umap_balanced"
+            cache_dir="cache/test_umap_balanced",
+            hash_transform=make_transform_hash(patch_size),
         )
         test_loader = DataLoader(test_ds_balanced, batch_size=1, shuffle=False, pin_memory=True)
 
